@@ -1,0 +1,35 @@
+{
+  "comments": [
+    {
+      "id": "1754856891389",
+      "url": "youtube.com",
+      "text": "<p>this is really great</p>\n",
+      "rawText": "this is really great",
+      "parentId": null,
+      "authorId": "1754856874383",
+      "authorName": "Ayuxh123",
+      "timestamp": "2025-08-10T20:14:51.389Z",
+      "upvotes": 0,
+      "downvotes": 0
+    }
+  ],
+  "users": [
+    {
+      "id": "1754856769962",
+      "fullname": "Test User",
+      "username": "testuser",
+      "email": "test@example.com",
+      "passwordHash": "$2a$10$9Tjb7kd3fybH9Pemzz.mve02jlx/jYBo9hyVUpnBKWUFWYTGZu9l2",
+      "createdAt": "2025-08-10T20:12:49.962Z"
+    },
+    {
+      "id": "1754856874383",
+      "fullname": "Ayush",
+      "username": "Ayuxh123",
+      "email": "ayuxh123@gmail.com",
+      "passwordHash": "$2a$10$pm9.PCp3D.aDNx1L/82j9OB1g5px6fJC0wlt1FhwGd4ce80nEU1.S",
+      "createdAt": "2025-08-10T20:14:34.383Z"
+    }
+  ],
+  "notifications": []
+}
