@@ -1,3 +1,5 @@
+require('dotenv').config();
+
 const express = require('express');
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
@@ -8,8 +10,28 @@ const { marked } = require('marked');
 const createDOMPurify = require('dompurify');
 const { JSDOM } = require('jsdom');
 const { OAuth2Client } = require('google-auth-library');
-const fs = require('fs');
-const path = require('path');
+const { Firestore } = require('@google-cloud/firestore');
+
+// Environment variables
+const PORT = process.env.PORT || 3000;
+const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || 'your-google-client-id';
+const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : ['http://localhost:3000'];
+const NODE_ENV = process.env.NODE_ENV || 'development';
+const GOOGLE_CLOUD_PROJECT_ID = process.env.GOOGLE_CLOUD_PROJECT_ID || 'your-project-id';
+
+// Initialize Firestore
+const firestore = new Firestore({
+  projectId: GOOGLE_CLOUD_PROJECT_ID,
+  // In production, credentials will be loaded from GOOGLE_APPLICATION_CREDENTIALS
+});
+
+// Collections
+const commentsCollection = firestore.collection('comments');
+const usersCollection = firestore.collection('users');
+const votesCollection = firestore.collection('votes');
+const notificationsCollection = firestore.collection('notifications');
+const passwordResetTokensCollection = firestore.collection('passwordResetTokens');
 
 const window = new JSDOM('').window;
 const DOMPurify = createDOMPurify(window);
@@ -23,18 +45,28 @@ const io = socketIo(server, {
   }
 });
 
-const PORT = 3000;
-const JWT_SECRET = 'your-secret-key-change-in-production'; // In production, use environment variable
-const GOOGLE_CLIENT_ID = 'your-google-client-id'; // In production, use environment variable
 const googleClient = new OAuth2Client(GOOGLE_CLIENT_ID);
 
-// Middleware
-app.use(cors({
-  origin: true, // Allow all origins
+// CORS configuration
+const corsOptions = {
+  origin: function (origin, callback) {
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+    
+    if (ALLOWED_ORIGINS.indexOf(origin) !== -1 || NODE_ENV === 'development') {
+      callback(null, true);
+    } else {
+      console.log('CORS blocked origin:', origin);
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
   credentials: true,
-  methods: ['GET', 'POST', 'OPTIONS'],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
-}));
+};
+
+// Middleware
+app.use(cors(corsOptions));
 app.use(express.json());
 
 // Add request logging for debugging
@@ -61,48 +93,8 @@ function authenticateToken(req, res, next) {
   });
 }
 
-// Data storage file path
-const DATA_FILE = path.join(__dirname, 'data.json');
-
-// Load data from file or initialize empty
-function loadData() {
-  try {
-    if (fs.existsSync(DATA_FILE)) {
-      const data = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
-      return {
-        comments: data.comments || [],
-        users: data.users || [],
-        notifications: data.notifications || []
-      };
-    }
-  } catch (error) {
-    console.error('Error loading data:', error);
-  }
-  return { comments: [], users: [], notifications: [] };
-}
-
-// Save data to file
-function saveData() {
-  try {
-    const data = {
-      comments,
-      users,
-      notifications
-    };
-    fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
-  } catch (error) {
-    console.error('Error saving data:', error);
-  }
-}
-
-// Load existing data
-const { comments, users, notifications } = loadData();
-
-// In-memory storage for development/testing
-// In production, replace this with Firestore
-const votes = new Map(); // Track votes: {commentId: {upvotes: number, downvotes: number}}
+// In-memory storage for sessions only (Firestore for data)
 const userSessions = new Map(); // Track active sessions
-const passwordResetTokens = new Map(); // Track password reset tokens: {email: {token, expiresAt}}
 
 // Helper function to build comment tree
 function buildCommentTree(comments) {
@@ -127,6 +119,26 @@ function buildCommentTree(comments) {
   });
   
   return rootComments;
+}
+
+// Helper function to get votes for a comment
+async function getVotesForComment(commentId) {
+  try {
+    const votesSnapshot = await votesCollection.where('commentId', '==', commentId).get();
+    let upvotes = 0;
+    let downvotes = 0;
+    
+    votesSnapshot.forEach(doc => {
+      const vote = doc.data();
+      if (vote.voteType === 'up') upvotes++;
+      else if (vote.voteType === 'down') downvotes++;
+    });
+    
+    return { upvotes, downvotes };
+  } catch (error) {
+    console.error('Error getting votes for comment:', error);
+    return { upvotes: 0, downvotes: 0 };
+  }
 }
 
 // Helper function to extract user mentions from text
@@ -154,16 +166,27 @@ app.post('/api/auth/register', async (req, res) => {
     }
     
     // Check if user already exists
-    const existingUser = users.find(u => u.email === email || u.username === username);
-    if (existingUser) {
-      return res.status(409).json({ error: 'User already exists' });
+    const existingUserSnapshot = await usersCollection
+      .where('email', '==', email)
+      .get();
+    
+    if (!existingUserSnapshot.empty) {
+      return res.status(409).json({ error: 'User with this email already exists' });
+    }
+    
+    const existingUsernameSnapshot = await usersCollection
+      .where('username', '==', username)
+      .get();
+    
+    if (!existingUsernameSnapshot.empty) {
+      return res.status(409).json({ error: 'Username already taken' });
     }
     
     // Hash password
     const passwordHash = await bcrypt.hash(password, 10);
     
+    // Create new user
     const newUser = {
-      id: Date.now().toString(),
       fullname,
       username,
       email,
@@ -171,16 +194,18 @@ app.post('/api/auth/register', async (req, res) => {
       createdAt: new Date()
     };
     
-    users.push(newUser);
-    saveData(); // Save to file
-    console.log('New user registered:', { username, email });
+    // Add to Firestore
+    const docRef = await usersCollection.add(newUser);
+    const userId = docRef.id;
+    
+    console.log('New user registered:', { username, email, userId });
     
     // Generate JWT token
-    const token = jwt.sign({ id: newUser.id, username: newUser.username }, JWT_SECRET, { expiresIn: '24h' });
+    const token = jwt.sign({ id: userId, username: newUser.username }, JWT_SECRET, { expiresIn: '24h' });
     
     res.status(201).json({
       token,
-      user: { id: newUser.id, fullname: newUser.fullname, username: newUser.username, email: newUser.email }
+      user: { id: userId, fullname: newUser.fullname, username: newUser.username, email: newUser.email }
     });
     
   } catch (error) {
@@ -198,11 +223,17 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(400).json({ error: 'Email and password are required' });
     }
     
-    // Find user
-    const user = users.find(u => u.email === email);
-    if (!user) {
+    // Find user in Firestore
+    const userSnapshot = await usersCollection
+      .where('email', '==', email)
+      .get();
+    
+    if (userSnapshot.empty) {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
+    
+    const userDoc = userSnapshot.docs[0];
+    const user = { id: userDoc.id, ...userDoc.data() };
     
     // Check password
     const validPassword = await bcrypt.compare(password, user.passwordHash);
@@ -376,10 +407,17 @@ app.get('/api/comments', async (req, res) => {
       return res.status(400).json({ error: 'URL parameter is required' });
     }
 
-    // Filter comments by URL
-    const filteredComments = comments
-      .filter(comment => comment.url === url)
-      .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+    // Get comments from Firestore
+    const commentsSnapshot = await commentsCollection
+      .where('url', '==', url)
+      .orderBy('timestamp', 'desc')
+      .get();
+
+    const comments = [];
+    commentsSnapshot.forEach(doc => {
+      const comment = { id: doc.id, ...doc.data() };
+      comments.push(comment);
+    });
 
     // Calculate pagination
     const pageNum = parseInt(page);
@@ -387,11 +425,18 @@ app.get('/api/comments', async (req, res) => {
     const startIndex = (pageNum - 1) * limitNum;
     const endIndex = startIndex + limitNum;
     
-    const totalComments = filteredComments.length;
+    const totalComments = comments.length;
     const totalPages = Math.ceil(totalComments / limitNum);
     
     // Get paginated comments
-    const paginatedComments = filteredComments.slice(startIndex, endIndex);
+    const paginatedComments = comments.slice(startIndex, endIndex);
+
+    // Add vote counts to comments
+    for (let comment of paginatedComments) {
+      const votes = await getVotesForComment(comment.id);
+      comment.upvotes = votes.upvotes;
+      comment.downvotes = votes.downvotes;
+    }
 
     // Build comment tree for threaded display
     const commentTree = buildCommentTree(paginatedComments);
@@ -427,44 +472,49 @@ app.post('/api/comments', authenticateToken, async (req, res) => {
     const finalText = DOMPurify.sanitize(htmlText);
 
     const newComment = {
-      id: Date.now().toString(), // Simple ID generation
       url,
       text: finalText,
       rawText: text, // Store original markdown text
       parentId: parentId || null, // Support for replies
       authorId: req.user.id,
       authorName: req.user.username,
-      timestamp: new Date(),
-      upvotes: 0,
-      downvotes: 0
+      timestamp: new Date()
     };
 
-    comments.push(newComment);
-    votes.set(newComment.id, { upvotes: 0, downvotes: 0 });
-    saveData(); // Save to file
+    // Add to Firestore
+    const docRef = await commentsCollection.add(newComment);
+    const commentId = docRef.id;
+    newComment.id = commentId;
+
     console.log('New comment added:', newComment);
 
     // Check for user mentions and create notifications
     const mentions = extractMentions(text);
-    mentions.forEach(mention => {
-      const mentionedUser = users.find(u => u.username.toLowerCase() === mention.toLowerCase());
-      if (mentionedUser && mentionedUser.id !== req.user.id) {
-        const notification = {
-          id: Date.now().toString() + Math.random(),
-          userId: mentionedUser.id,
-          type: 'mention',
-          message: `${req.user.username} mentioned you in a comment`,
-          commentId: newComment.id,
-          url: url,
-          timestamp: new Date(),
-          read: false
-        };
-        notifications.push(notification);
-        
-        // Emit notification to mentioned user
-        io.emit('notification', { userId: mentionedUser.id, notification });
+    for (const mention of mentions) {
+      const mentionedUserSnapshot = await usersCollection
+        .where('username', '==', mention)
+        .get();
+      
+      if (!mentionedUserSnapshot.empty) {
+        const mentionedUser = mentionedUserSnapshot.docs[0];
+        if (mentionedUser.id !== req.user.id) {
+          const notification = {
+            userId: mentionedUser.id,
+            type: 'mention',
+            message: `${req.user.username} mentioned you in a comment`,
+            commentId: commentId,
+            url: url,
+            timestamp: new Date(),
+            read: false
+          };
+          
+          await notificationsCollection.add(notification);
+          
+          // Emit notification to mentioned user
+          io.emit('notification', { userId: mentionedUser.id, notification });
+        }
       }
-    });
+    }
 
     // Emit real-time update
     io.emit('newComment', { url, comment: newComment });
@@ -486,32 +536,51 @@ app.post('/api/comments/:id/vote', authenticateToken, async (req, res) => {
       return res.status(400).json({ error: 'Invalid vote type. Must be "up", "down", or "remove"' });
     }
     
-    const comment = comments.find(c => c.id === id);
-    if (!comment) {
+    // Check if comment exists
+    const commentDoc = await commentsCollection.doc(id).get();
+    if (!commentDoc.exists) {
       return res.status(404).json({ error: 'Comment not found' });
     }
     
-    // Handle vote removal
+    // Check if user already voted on this comment
+    const existingVoteSnapshot = await votesCollection
+      .where('commentId', '==', id)
+      .where('userId', '==', req.user.id)
+      .get();
+    
     if (voteType === 'remove') {
-      // For demo purposes, we'll just reset the vote counts
-      // In a real app, you'd track individual user votes
-      comment.upvotes = Math.max(0, comment.upvotes - 1);
-      comment.downvotes = Math.max(0, comment.downvotes - 1);
-      console.log(`Vote removed from comment ${id}`);
-    } else {
-      // Update vote counts
-      if (voteType === 'up') {
-        comment.upvotes++;
-      } else {
-        comment.downvotes++;
+      // Remove existing vote
+      if (!existingVoteSnapshot.empty) {
+        await existingVoteSnapshot.docs[0].ref.delete();
+        console.log(`Vote removed from comment ${id}`);
       }
-      console.log(`Vote ${voteType} added to comment ${id}`);
+    } else {
+      // Add or update vote
+      const voteData = {
+        commentId: id,
+        userId: req.user.id,
+        voteType: voteType,
+        timestamp: new Date()
+      };
+      
+      if (!existingVoteSnapshot.empty) {
+        // Update existing vote
+        await existingVoteSnapshot.docs[0].ref.update({ voteType: voteType });
+        console.log(`Vote updated to ${voteType} for comment ${id}`);
+      } else {
+        // Add new vote
+        await votesCollection.add(voteData);
+        console.log(`Vote ${voteType} added to comment ${id}`);
+      }
     }
     
-    // Emit real-time update
-    io.emit('commentVoted', { commentId: id, upvotes: comment.upvotes, downvotes: comment.downvotes });
+    // Get updated vote counts
+    const votes = await getVotesForComment(id);
     
-    res.json({ success: true, upvotes: comment.upvotes, downvotes: comment.downvotes });
+    // Emit real-time update
+    io.emit('commentVoted', { commentId: id, upvotes: votes.upvotes, downvotes: votes.downvotes });
+    
+    res.json({ success: true, upvotes: votes.upvotes, downvotes: votes.downvotes });
     
   } catch (error) {
     console.error('Error voting on comment:', error);
@@ -529,10 +598,13 @@ app.put('/api/comments/:id', authenticateToken, async (req, res) => {
       return res.status(400).json({ error: 'Text is required' });
     }
     
-    const comment = comments.find(c => c.id === id);
-    if (!comment) {
+    // Check if comment exists in Firestore
+    const commentDoc = await commentsCollection.doc(id).get();
+    if (!commentDoc.exists) {
       return res.status(404).json({ error: 'Comment not found' });
     }
+    
+    const comment = { id: commentDoc.id, ...commentDoc.data() };
     
     // Check if user owns the comment
     if (comment.authorId !== req.user.id) {
@@ -544,16 +616,26 @@ app.put('/api/comments/:id', authenticateToken, async (req, res) => {
     const htmlText = marked(sanitizedText);
     const finalText = DOMPurify.sanitize(htmlText);
     
-    comment.text = finalText;
-    comment.rawText = text; // Store original markdown text
-    comment.editedAt = new Date();
+    // Update comment in Firestore
+    await commentsCollection.doc(id).update({
+      text: finalText,
+      rawText: text, // Store original markdown text
+      editedAt: new Date()
+    });
+    
+    const updatedComment = {
+      ...comment,
+      text: finalText,
+      rawText: text,
+      editedAt: new Date()
+    };
     
     console.log(`Comment ${id} edited by ${req.user.username}`);
     
     // Emit real-time update
-    io.emit('commentEdited', { commentId: id, text, editedAt: comment.editedAt });
+    io.emit('commentEdited', { commentId: id, text: finalText, editedAt: updatedComment.editedAt });
     
-    res.json(comment);
+    res.json(updatedComment);
     
   } catch (error) {
     console.error('Error editing comment:', error);
@@ -566,47 +648,64 @@ app.delete('/api/comments/:id', authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
     
-    const comment = comments.find(c => c.id === id);
-    if (!comment) {
+    // Check if comment exists in Firestore
+    const commentDoc = await commentsCollection.doc(id).get();
+    if (!commentDoc.exists) {
       return res.status(404).json({ error: 'Comment not found' });
     }
+    
+    const comment = { id: commentDoc.id, ...commentDoc.data() };
     
     // Check if user owns the comment
     if (comment.authorId !== req.user.id) {
       return res.status(403).json({ error: 'Not authorized to delete this comment' });
     }
     
-    // Remove comment and its replies
-    const commentIndex = comments.findIndex(c => c.id === id);
-    comments.splice(commentIndex, 1);
+    // Delete comment from Firestore
+    await commentsCollection.doc(id).delete();
     
-    // Remove replies
-    const repliesToRemove = comments.filter(c => c.parentId === id);
-    repliesToRemove.forEach(reply => {
-      const replyIndex = comments.findIndex(c => c.id === reply.id);
-      comments.splice(replyIndex, 1);
-    });
+    // Delete all replies to this comment
+    const repliesSnapshot = await commentsCollection
+      .where('parentId', '==', id)
+      .get();
+    
+    const deletePromises = repliesSnapshot.docs.map(doc => doc.ref.delete());
+    await Promise.all(deletePromises);
+    
+    // Delete all votes for this comment
+    const votesSnapshot = await votesCollection
+      .where('commentId', '==', id)
+      .get();
+    
+    const voteDeletePromises = votesSnapshot.docs.map(doc => doc.ref.delete());
+    await Promise.all(voteDeletePromises);
     
     console.log(`Comment ${id} deleted by ${req.user.username}`);
     
     // Emit real-time update
     io.emit('commentDeleted', { commentId: id });
     
-      res.json({ success: true });
-  
-} catch (error) {
-  console.error('Error deleting comment:', error);
-  res.status(500).json({ error: 'Failed to delete comment' });
-}
+    res.json({ success: true });
+    
+  } catch (error) {
+    console.error('Error deleting comment:', error);
+    res.status(500).json({ error: 'Failed to delete comment' });
+  }
 });
 
 // GET /api/notifications - Get user notifications
-app.get('/api/notifications', authenticateToken, (req, res) => {
+app.get('/api/notifications', authenticateToken, async (req, res) => {
   try {
-    const userNotifications = notifications
-      .filter(n => n.userId === req.user.id)
-      .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
-      .slice(0, 50); // Limit to 50 most recent
+    const notificationsSnapshot = await notificationsCollection
+      .where('userId', '==', req.user.id)
+      .orderBy('timestamp', 'desc')
+      .limit(50)
+      .get();
+    
+    const userNotifications = notificationsSnapshot.docs.map(doc => ({
+      id: doc.id,
+      ...doc.data()
+    }));
     
     res.json(userNotifications);
   } catch (error) {
@@ -616,16 +715,24 @@ app.get('/api/notifications', authenticateToken, (req, res) => {
 });
 
 // PUT /api/notifications/:id/read - Mark notification as read
-app.put('/api/notifications/:id/read', authenticateToken, (req, res) => {
+app.put('/api/notifications/:id/read', authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
-    const notification = notifications.find(n => n.id === id && n.userId === req.user.id);
     
-    if (!notification) {
+    const notificationDoc = await notificationsCollection.doc(id).get();
+    if (!notificationDoc.exists) {
       return res.status(404).json({ error: 'Notification not found' });
     }
     
-    notification.read = true;
+    const notification = { id: notificationDoc.id, ...notificationDoc.data() };
+    
+    // Check if user owns the notification
+    if (notification.userId !== req.user.id) {
+      return res.status(403).json({ error: 'Not authorized to mark this notification as read' });
+    }
+    
+    await notificationsCollection.doc(id).update({ read: true });
+    
     res.json({ success: true });
   } catch (error) {
     console.error('Error marking notification as read:', error);

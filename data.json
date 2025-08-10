@@ -9,6 +9,54 @@
       "authorId": "1754856874383",
       "authorName": "Ayuxh123",
       "timestamp": "2025-08-10T20:14:51.389Z",
+      "upvotes": 3,
+      "downvotes": 1
+    },
+    {
+      "id": "1754858588260",
+      "url": "youtube.com",
+      "text": "<p>hey</p>\n",
+      "rawText": "hey",
+      "parentId": "1754856891389",
+      "authorId": "1754858577960",
+      "authorName": "Ayuxh11",
+      "timestamp": "2025-08-10T20:43:08.260Z",
+      "upvotes": 0,
+      "downvotes": 0
+    },
+    {
+      "id": "1754858595513",
+      "url": "youtube.com",
+      "text": "<p>hey </p>\n",
+      "rawText": "hey ",
+      "parentId": "1754858588260",
+      "authorId": "1754858577960",
+      "authorName": "Ayuxh11",
+      "timestamp": "2025-08-10T20:43:15.513Z",
+      "upvotes": 0,
+      "downvotes": 0
+    },
+    {
+      "id": "1754858608749",
+      "url": "youtube.com",
+      "text": "<p>yo</p>\n",
+      "rawText": "yo",
+      "parentId": null,
+      "authorId": "1754858577960",
+      "authorName": "Ayuxh11",
+      "timestamp": "2025-08-10T20:43:28.749Z",
+      "upvotes": 1,
+      "downvotes": 0
+    },
+    {
+      "id": "1754858636592",
+      "url": "netflix.com/in/login",
+      "text": "<p>hhi</p>\n",
+      "rawText": "hhi",
+      "parentId": null,
+      "authorId": "1754858577960",
+      "authorName": "Ayuxh11",
+      "timestamp": "2025-08-10T20:43:56.592Z",
       "upvotes": 0,
       "downvotes": 0
     }
@@ -29,6 +77,14 @@
       "email": "ayuxh123@gmail.com",
       "passwordHash": "$2a$10$pm9.PCp3D.aDNx1L/82j9OB1g5px6fJC0wlt1FhwGd4ce80nEU1.S",
       "createdAt": "2025-08-10T20:14:34.383Z"
+    },
+    {
+      "id": "1754858577960",
+      "fullname": "Ayush",
+      "username": "Ayuxh11",
+      "email": "ayuxh124@gmail.com",
+      "passwordHash": "$2a$10$4FlT4Cqpia7ZC7ArWQkzH.E/DUCzgfoGZmJmVZ6qDhzPB.TNEmkFC",
+      "createdAt": "2025-08-10T20:42:57.960Z"
     }
   ],
   "notifications": []
